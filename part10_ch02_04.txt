@@ -21,6 +21,7 @@ $ CREATE COLUMNFAMILY skus (
 $ docker ps -> container_id 확인
 $ docker cp data/input.csv {container_id}:/input.csv # local의 input.csv를 cassandra docker container에 복사.
 $ docker exec -it fc_cassandra bash 
+$ ls -all
 
 # cqlsh
 $ USE fc_catalog;
