@@ -1,0 +1,189 @@
+# 1. docker 이용해서 cassandra 설치
+
+$ docker pull cassandra
+$ docker container run --name fc_cassandra -p 9042:9042 -d cassandra:latest
+$ docker ps
+
+# cqlsh 실행 (docker container 띄운 후 바로 실행하면 connection refused 발생. 1~2분 정도 대기 후에 실행)
+$ docker exec -it fc_cassandra cqlsh
+# bash 실행
+$ docker exec -it fc_cassandra bash
+
+# 2. cqlsh commands
+
+# 2.1 keyspace 생성
+
+$ create keyspace "fc_catalog" WITH replication={'class':'SimpleStrategy', 'replication_factor': 3};
+$ describe keyspaces
+
+# 2.2 columnfamily(table) 생성
+
+$ use fc_catalog;
+$ CREATE COLUMNFAMILY products (
+    productId varchar,
+    title text,
+    brand varchar,
+    price int,
+    score double,
+    PRIMARY KEY(productId)
+);
+
+# keyspace내에 존재하는 모든 columnfamily들 확인
+$ describe columnfamilies;
+$ describe products;
+
+# column family 정보 업데이트
+$ ALTER COLUMNFAMILY products ADD subtitle text;
+$ ALTER COLUMNFAMILY products WITH gc_grace_seconds=86400; 
+
+
+# 2.3 columnfamily에 데이터 추가 (INSERT)
+
+# 일부 컬럼만 추가
+$ INSERT INTO products (productId, title, brand, price) 
+    VALUES ('P1111', 'Iphone13', 'apple', 100000);
+
+# 모든 컬럼 추가
+$ INSERT INTO products (productId, title, subtitle, brand, price, score)
+    VALUES ('P2222', 'lecture1','the greatest lecture', 'fastcampus', 10000, 5.0);
+
+# columnfamily 생성 시 정의하지 않은 필드 값을 넣으면? -> Undefined Error 발생.
+$ INSERT INTO products (productId, title, price, review) 
+    VALUES ('P3333', 'macbook-air', 500000, 'silent notebook!');
+
+# TIMESTAMP를 명시적으로 지정할 수 있음
+# current timestamp : https://www.epochconverter.com/
+$ INSERT INTO products (productId, title, brand, price) 
+    VALUES ('P4444', 'macbook-pro', 'apple', 900000) USING TIMESTAMP 1682920406000;
+
+# TTL (Time to limit) 적용 가능.
+# TTL 이후에 이 row는 deleted mark (tombstone) 마킹.
+$ INSERT INTO products (productId, title, subtitle, brand, price, score)
+    VALUES ('P5555', 'lecture2', 'essence of data engineering', 'fastcampus', 30000, 4.9)
+    USING TTL 86400;
+
+
+# 2.4 columnfamily의 데이터 읽기 (SELECT)
+$ SELECT * FROM products;
+$ SELECT * FROM fc_catalog.products; # {keyspace}.{columnfamily}
+
+# SQL문이나, 쿼리의 결과 테이블이나 MySQL같은 RDBMS와 뭔가 되게 비슷해보임.
+# CQL의 결과를 보면 비어있는 column 값은 마치 null로 저장된 것처럼 보임.
+# 그러나 Cassandra에서는 실제로 이런 식으로 데이터를 저장하지 않는다.
+# Cassandra의 data type => Map<Row key, SortedMap<column_name, column_value>>
+
+# WHERE 절에서 '=' , 'IN' 절 지원.
+$ SELECT * FROM products WHERE productId = 'P4444';
+$ SELECT * FROM products WHERE productId IN ('P1111', 'P2222', 'P3333');
+
+# WHERE 절에 range query 지원 ? -> 에러 발생
+# 조건 절의 제약 조건들에 대해서는 "5.CQL에서 Partition Key, Clustering Key의 제약 조건"
+# 강의에서 한 번에 정리해서 설명드릴 예정
+$ SELECT * FROM products WHERE price >= 60000; -> error
+
+
+# 2.5 COLLECTION types
+# set, list, map
+# nested collection (ex: set<set>, map<varchar, list>) 은 지원하지 않음.
+
+# 2.5.1 set
+# set 필드 추가
+$ ALTER COLUMNFAMILY products ADD key_features set<text>;
+# 데이터 추가
+$ INSERT INTO products (productId, title, brand, price, key_features)
+    VALUES ('P6666', 'mechanical keyboard1', 'happyhacking', 200000, {'bluetooth','red-axis'});
+$ SELECT * FROM products WHERE productid = 'P6666';
+
+# 2.5.2 list
+# list 필드 추가
+$ ALTER COLUMNFAMILY products ADD sku_ids list<text>;
+# 데이터 추가
+$ INSERT INTO products (productId, title, brand, price, sku_ids)
+    VALUES ('P7777', 'mechanical keyboard2', 'realforce', 250000, ['s12', 's13']);
+$ SELECT * FROM products WHERE productid = 'P7777';
+
+# 2.5.3 map
+# map 필드 추가
+$ ALTER COLUMNFAMILY products ADD attributes map<text,text>;
+# 데이터 추가
+$ INSERT INTO products (productId, title, brand, price, attributes)
+    VALUES ('P8888', 'mechanical keyboard3', 'corsair', 10000, 
+    {'weight': '2', 'width': '20', 'height': '10'});
+$ SELECT * FROM products WHERE productid = 'P8888';
+
+
+# 2.6 counter
+
+# 특정 사건이 발생한 횟수 등을 계산하기 위한 특별한 목적의 컬럼.
+# Q) 그냥 int 타입의 컬럼을 만들고, + 1 하는 update cql문 날리면 되지 않을까?
+# -> 여러 순차적인 연산들이 필요함
+#   1. lock 획득
+#   2. column 값 읽기
+#   3.  + 1 increment
+#   4. lock 해제.
+# 반면 Counter는 이 일련의 과정들을 atomic 하게 처리.
+
+# counter 의 제약 조건
+#   1. counter는 별도의 columnfamily 에 저장되어야 함. 그 columnfamily는
+#   primary key와 counter column 만을 포함함.
+#   2. counter column에 대해서는 index 생성 불가.
+
+$ CREATE COLUMNFAMILY products_view_count(productid text primary key, view_count COUNTER);
+
+# productid가 존재하지 않으면 새로 생성(view_count = 1), 이미 존재하면 + 1
+$ UPDATE products_view_count SET view_count = view_count + 1 WHERE productid = 'P1111';
+
+# 2.7 UPDATE - simple type
+$ UPDATE products SET title='Iphone14' WHERE productid='P1111';
+
+# 2.8 UPDATE - collection type
+
+# 2.8.1 set
+
+# add element
+# SET <column_name>=<column_name>+{new_value}
+$ UPDATE products SET key_features=key_features+{'new'} WHERE productid = 'P6666';
+$ SELECT * FROM products WHERE productid = 'P6666';
+
+# remove element
+# SET <column_name>=<column_name>-{existing_value}
+$ UPDATE products SET key_features=key_features-{'new'} WHERE productid = 'P6666';
+$ SELECT * FROM products WHERE productid = 'P6666';
+
+# replace element
+$ 지원하지 않음
+
+# 2.8.2 list
+
+# add element
+# SET <column_name>=<column_name>+[new_value]
+$ UPDATE products SET sku_ids=sku_ids+['s25', 's26', 's30'] WHERE productid = 'P7777';
+$ SELECT * FROM products WHERE productid = 'P7777';
+
+# remove element
+# SET <column_name>=<column_name>-[existing_value]
+$ UPDATE products SET sku_ids=sku_ids-['s12'] WHERE productid = 'P7777';
+$ SELECT * FROM products WHERE productid = 'P7777';
+
+# replace element
+# SET <column_name>[index] = 'new value'
+$ UPDATE products SET sku_ids[0] = 's100' WHERE productid = 'P7777';
+$ SELECT * FROM products WHERE productid = 'P7777';
+
+# 2.8.3 map
+
+# add element
+# SET <column_name>=<column_name>+{key:value}
+$ UPDATE products SET attributes=attributes+{'color':'black'}
+$ SELECT * FROM products WHERE productid = 'P8888';
+
+# remove element
+# DELETE <column_name>['key'] FROM <columnfamily>
+$ DELETE attributes['color'] FROM products WHERE productid = 'P8888';
+$ SELECT * FROM products WHERE productid = 'P8888';
+
+# replace element
+# SET <column_name>['key'] = 'new value'
+$ UPDATE products SET attributes['width'] = '30' WHERE productid = 'P8888';
+$ SELECT * FROM products WHERE productid = 'P8888';
+
