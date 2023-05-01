@@ -5,6 +5,8 @@ $ docker exec -it fc_cassandra cqlsh
 # columnfamily 생성
 # (sellerId, skuId) : partition key (어느 Node에 배치되는지를 결정)
 # (sku_created_at, productId) : clustering columns (한 Node의 Partition 내에서 어떻게 정렬되는지를 결정)
+
+$ use fc_catalog;
 $ CREATE COLUMNFAMILY skus (
     skuId varchar,
     sellerId varchar,
@@ -18,7 +20,8 @@ $ CREATE COLUMNFAMILY skus (
 # In terminal,
 $ docker ps -> container_id 확인
 $ docker cp data/input.csv {container_id}:/input.csv # local의 input.csv를 cassandra docker container에 복사.
- 
+$ docker exec -it fc_cassandra bash 
+
 # cqlsh
 $ USE fc_catalog;
 # csv 파일을 cassandra columnfamily에 bulk write.
