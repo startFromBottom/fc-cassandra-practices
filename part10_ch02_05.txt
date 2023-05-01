@@ -1,0 +1,50 @@
+## 1. 세팅
+
+# part10_ch02_04 에서 만든 
+# skus columnfamily를 그대로 사용
+
+$ docker exec -it fc_cassandra cqlsh # terminal
+$ use fc_catalog;
+
+## 2. secondary index 생성
+$ create index skus_index ON skus(fc_title);
+
+## 3. secondary index & WHERE
+
+# WHERE 절에 partition key를 넣지 않고,
+# secondary index 만으로 쿼리 가능.
+$ SELECT * FROM skus 
+    WHERE fc_title = 'fc_01'; # OK
+
+# "IN" predicate : X
+$ SELECT * FROM skus 
+    WHERE fc_title IN ('fc_01', 'fc_02'); # error
+
+# Range Query : X
+$ SELECT * FROM skus 
+    WHERE fc_title >= 'fc_01';
+
+## 3. secondary index & partition key
+
+# partition key를 구성하는 일부 column과 같이 쿼리 -> X
+$ SELECT * FROM skus WHERE sellerId = 's1'
+    AND fc_title = 'fc_01'; # Error
+
+# partition key를 구성하는 모든 column과 같이 쿼리 -> O
+$ SELECT * FROM skus WHERE sellerId = 's1'
+    AND skuid = 'sku11'
+    AND fc_title = 'fc_01'; # OK
+
+
+## 4. secondary index & clustering columns
+
+# 같이 사용 가능 ? -> X
+$ SELECT * FROM skus
+    WHERE fc_title = 'fc_01'
+        AND sku_created_at >= '2022-01-01 00:00:00';
+
+
+## 5. order by with secondary index
+$ SELECT * FROM skus 
+    WHERE fc_title IN ('fc_01', 'fc_02') 
+    ORDER BY fc_title;
