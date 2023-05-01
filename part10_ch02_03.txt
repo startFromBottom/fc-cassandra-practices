@@ -174,7 +174,7 @@ $ SELECT * FROM products WHERE productid = 'P7777';
 
 # add element
 # SET <column_name>=<column_name>+{key:value}
-$ UPDATE products SET attributes=attributes+{'color':'black'}
+$ UPDATE products SET attributes=attributes+{'color':'black'} WHERE productid = 'P8888';
 $ SELECT * FROM products WHERE productid = 'P8888';
 
 # remove element
