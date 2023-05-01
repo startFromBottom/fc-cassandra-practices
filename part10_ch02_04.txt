@@ -1,0 +1,129 @@
+## 1. 세팅
+
+$ docker exec -it fc_cassandra cqlsh
+
+# columnfamily 생성
+# (sellerId, skuId) : partition key (어느 Node에 배치되는지를 결정)
+# (sku_created_at, productId) : clustering columns (한 Node의 Partition 내에서 어떻게 정렬되는지를 결정)
+$ CREATE COLUMNFAMILY skus (
+    skuId varchar,
+    sellerId varchar,
+    productId varchar,
+    fc_title varchar,
+    sku_created_at text,
+    is_valid boolean,
+    PRIMARY KEY ((sellerId,skuId), sku_created_at, productId)
+);
+
+# In terminal,
+$ docker ps -> container_id 확인
+$ docker cp data/input.csv {container_id}:/input.csv # local의 input.csv를 cassandra docker container에 복사.
+ 
+# cqlsh
+$ USE fc_catalog;
+# csv 파일을 cassandra columnfamily에 bulk write.
+$ COPY skus (skuId, sellerId, productId, fc_title, sku_created_at, is_valid) FROM '/input.csv';
+$ SELECT * FROM skus;
+
+
+## 2. Partition Key 제약 조건
+
+# 2.1 Partition Key 제약 조건 1) 
+# - WHERE 절에는 Partition Key를 만드는 데 사용되는 모든 column들이 명시되어야 함.
+
+# 아래 쿼리들에서 에러 발생 -> why?
+# 특정 row가 어느 node에 들어가야할지를 정하는 token 값을 계산할 때,
+# hash_func(partition key) 값을 사용.
+# 조건절에서 hash_func(partition key)을 이용해 쿼리할 수 있다면, 
+# 모든 Node의 값을 탐색할 필요 X
+# 그런데, columnfamily를 정의할 때 sellerId,skuId 두 column을 이용해
+# partition key를 생성
+# -> 한 column만으로는 hash_func(partition key)를 구할 수 없음.
+# -> 결국 모든 Node 탐색 필요. (에러 메시지 대로 ALLOW FILTERING 붙이면 
+# 쿼리가 가능은 하지만 전체 Node를 탐색 -> 비효율)
+
+$ SELECT * FROM skus WHERE sellerId = 's1'; # Error
+$ SELECT * FROM skus WHERE sellerId IN ('s1', 's2'); # Error
+$ SELECT * FROM skus WHERE skuId = 'sku11'; # Error
+$ SELECT * FROM skus WHERE skuId IN ('sku11', 'sku12'); # Error
+
+# clustering column 사용 시
+$ SELECT * FROM skus WHERE sku_created_at = '2023-03-01 00:00:00'; # Error
+# PRIMARY KEY를 만드는데 사용되지 않은 column 사용 시
+$ SELECT * FROM skus WHERE is_valid = true; # Error
+
+# WHERE 절에는 partition key에 사용되는 모든 column들이 들어가야 함.
+$ SELECT * FROM skus WHERE sellerId = 's1' AND skuId = 'sku11'; # OK
+
+# 2.2 Partition Key 제약 조건 2)
+# - WHERE 문에 Partition key 사용 시, '=', 'IN' 연산만 사용 가능. (>=, >, <, <= 지원 X)
+$ SELECT * FROM skus WHERE sellerId > 's1' AND skuId > 'sku11';
+
+# token을 이용해 Range query를 수행하는 것은 가능.
+$ SELECT * FROM skus WHERE token(sellerId, skuId) >= token('s1', 'sku11');
+
+# 2.3 Partition Key 제약 조건 3)
+# -  ORDER BY 절에 Partition Key의 column은 사용 불가.
+$ SELECT * FROM skus WHERE sellerId = 's1' AND skuId = 'sku11' 
+    ORDER BY sellerId;
+
+
+## 3. Clustering Columns 제약 조건
+
+# clustering columns : 정의한 순서가 중요함.
+# =, IN, range query(>=, >, <, <=), ORDER BY를 지원하지만
+# 제약 조건들이 존재.
+
+# 3.1 Clustering Columns 제약 조건 1)
+# WHERE 절에 N번째 clustering column을 넣었다면,
+# 1, ... , N-1번째 clustering columns들로 제한 되어야 함.
+# (= WHERE 문에 반드시 넣어야 함)
+# ex)
+$ SELECT * FROM skus WHERE sellerId IN ('s1', 's2', 's3') 
+    AND skuId IN ('sku11', 'sku12')
+    AND productId = 'P1234'; # Error
+
+$ SELECT * FROM skus WHERE sellerId IN ('s1', 's2', 's3') 
+    AND skuId IN ('sku11', 'sku12')
+    AND sku_created_at >= '2022-01-01 00:00:00'; # OK
+
+# 3.2 Clustering Columns 제약 조건 2)
+# 더 앞에 정의한 Clustering column으로 range query를 수행했다면,
+# 뒤의 Clustering column으로 제한할 수 없음(= WHERE 조건에 넣을 수 없음)
+
+# ex)
+$ SELECT * FROM skus WHERE sellerId IN ('s1', 's2', 's3') 
+    AND skuId IN ('sku11', 'sku12')
+    AND sku_created_at >= '2022-01-01 00:00:00'
+    AND productId >= 'P1234'; # Error
+
+$ SELECT * FROM skus WHERE sellerId IN ('s1', 's2', 's3') 
+    AND skuId IN ('sku11', 'sku12')
+    AND sku_created_at = '2022-01-01 00:00:00'
+    AND productId >= 'P1234'; # OK
+
+# 3.3 Clustering Columns 제약 조건 3)
+# Clustering Columns 으로 ORDER BY를 사용하기 위해서는
+# WHERE 절에서 partition key로 "IN" 조건을 사용하면 안되고,
+# N 번째 Clustering Column으로 정렬하려면,
+# 1, ... , N-1 번째 Clustering Column도 ORDER BY 조건에 넣어야 함.
+
+$ SELECT * FROM skus WHERE sellerId IN ('s1', 's2', 's3') 
+    AND skuId IN ('sku11', 'sku12') ORDER BY sku_created_at; # Error
+
+$ SELECT * FROM skus WHERE sellerId = 's1'
+    AND skuId IN ('sku11', 'sku12') ORDER BY sku_created_at; # Error
+
+$ SELECT * FROM skus WHERE sellerId = 's1'
+    AND skuId = 'sku11'
+    ORDER BY sku_created_at, productId; # OK
+
+$ SELECT * FROM skus WHERE sellerId = 's1'
+    AND skuId = 'sku11' 
+    AND sku_created_at IN ('2022-01-01 00:00:00', '2023-01-01 00:00:00')
+    ORDER BY sku_created_at, productId; # OK
+ 
+$ SELECT * FROM skus WHERE sellerId = 's1'
+    AND skuId = 'sku11' 
+    AND sku_created_at >= '2022-01-01 00:00:00'
+    ORDER BY sku_created_at, productId; # OK
